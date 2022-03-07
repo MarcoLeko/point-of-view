@@ -22,9 +22,11 @@ function fastifyView (fastify, opts, next) {
     next(new Error(`'${type}' not yet supported, PR? :)`))
     return
   }
+
+  let engine = opts.engine[type]
+
   const charset = opts.charset || 'utf-8'
   const propertyName = opts.propertyName || 'view'
-  const engine = opts.engine[type]
   const globalOptions = opts.options || {}
   const templatesDir = opts.root || resolve(opts.templates || './')
   const lru = HLRU(opts.maxCache || 100)
@@ -33,6 +35,10 @@ function fastifyView (fastify, opts, next) {
   const prod = typeof opts.production === 'boolean' ? opts.production : process.env.NODE_ENV === 'production'
   const defaultCtx = opts.defaultContext || {}
   const globalLayoutFileName = opts.layout
+
+  if (type === 'handlebars' && globalOptions.withPromisedHandlebarEngine) {
+    engine = globalOptions.withPromisedHandlebarEngine(opts.engine[type])
+  }
 
   function layoutIsValid (_layoutFileName) {
     if (type !== 'dot' && type !== 'handlebars' && type !== 'ejs' && type !== 'eta') {
@@ -80,8 +86,10 @@ function fastifyView (fastify, opts, next) {
 
     const promise = new Promise((resolve, reject) => {
       renderer.apply({
-        getHeader: () => { },
-        header: () => { },
+        getHeader: () => {
+        },
+        header: () => {
+        },
         send: result => {
           if (result instanceof Error) {
             reject(result)
@@ -160,6 +168,7 @@ function fastifyView (fastify, opts, next) {
   function getRequestedPath (fastify) {
     return (fastify && fastify.request) ? fastify.request.context.config.url : null
   }
+
   // Gets template as string (or precompiled for Handlebars)
   // from LRU cache or filesystem.
   const getTemplate = function (file, callback, requestedPath) {
@@ -177,7 +186,14 @@ function fastifyView (fastify, opts, next) {
           data = globalOptions.useHtmlMinifier.minify(data, globalOptions.htmlMinifierOptions || {})
         }
         if (type === 'handlebars') {
-          data = engine.compile(data)
+          if (globalOptions.withPromisedHandlebarEngine) {
+            data = engine.compile(data).then(() => {
+              lru.set(file, data)
+              callback(null, data)
+            })
+          } else {
+            data = engine.compile(data)
+          }
         }
         lru.set(file, data)
         callback(null, data)
@@ -459,6 +475,9 @@ function fastifyView (fastify, opts, next) {
             if (!this.getHeader('content-type')) {
               this.header('Content-Type', 'text/html; charset=' + charset)
             }
+
+            console.log(html)
+
             this.send(html)
           } catch (e) {
             this.send(e)
@@ -627,7 +646,10 @@ function fastifyView (fastify, opts, next) {
   }
 
   if (prod && type === 'handlebars' && globalOptions.partials) {
-    getPartials(type, { partials: globalOptions.partials || {}, requestedPath: getRequestedPath(this) }, (err, partialsObject) => {
+    getPartials(type, {
+      partials: globalOptions.partials || {},
+      requestedPath: getRequestedPath(this)
+    }, (err, partialsObject) => {
       if (err) {
         next(err)
         return
@@ -641,6 +663,16 @@ function fastifyView (fastify, opts, next) {
     next()
   }
 
+  console.log('###should go into here###')
+
+  if (type === 'handlebars' && globalOptions.helpers) {
+    Object.keys(globalOptions.helpers).forEach((name) => {
+      engine.registerHelper(name, globalOptions.helpers[name])
+    })
+  }
+
+  console.log(engine.helpers)
+
   function withLayout (render, layout) {
     if (layout) {
       return function (page, data, opts) {
@@ -648,8 +680,10 @@ function fastifyView (fastify, opts, next) {
         const that = this
         data = Object.assign({}, defaultCtx, this.locals, data)
         render.call({
-          getHeader: () => { },
-          header: () => { },
+          getHeader: () => {
+          },
+          header: () => {
+          },
           send: (result) => {
             if (result instanceof Error) {
               throw result
